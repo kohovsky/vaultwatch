@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -8,89 +9,72 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config holds the top-level configuration for vaultwatch.
+// Config holds the full vaultwatch configuration.
 type Config struct {
-	Vault   VaultConfig   `yaml:"vault"`
-	Alerts  AlertsConfig  `yaml:"alerts"`
-	Monitor MonitorConfig `yaml:"monitor"`
+	VaultAddress string   `yaml:"vault_address"`
+	VaultToken   string   `yaml:"vault_token"`
+	Paths        []string `yaml:"paths"`
+	Interval     string   `yaml:"interval"`
+	Thresholds   struct {
+		Warning  string `yaml:"warning"`
+		Critical string `yaml:"critical"`
+	} `yaml:"thresholds"`
+	Alerts struct {
+		LogFile    string `yaml:"log_file"`
+		WebhookURL string `yaml:"webhook_url"`
+		SlackURL   string `yaml:"slack_url"`
+	} `yaml:"alerts"`
+
+	// Parsed durations — populated by Load.
+	WarningThreshold  time.Duration
+	CriticalThreshold time.Duration
+	PollInterval      time.Duration
 }
 
-// VaultConfig contains Vault connection settings.
-type VaultConfig struct {
-	Address string `yaml:"address"`
-	Token   string `yaml:"token"`
-	RoleID  string `yaml:"role_id"`
-	SecretID string `yaml:"secret_id"`
-}
-
-// AlertsConfig defines alert thresholds and notification channels.
-type AlertsConfig struct {
-	Thresholds []string `yaml:"thresholds"` // e.g. ["72h", "24h", "1h"]
-	Slack      *SlackConfig `yaml:"slack,omitempty"`
-	Email      *EmailConfig `yaml:"email,omitempty"`
-}
-
-// SlackConfig holds Slack webhook settings.
-type SlackConfig struct {
-	WebhookURL string `yaml:"webhook_url"`
-	Channel    string `yaml:"channel"`
-}
-
-// EmailConfig holds SMTP settings for email alerts.
-type EmailConfig struct {
-	SMTPHost   string   `yaml:"smtp_host"`
-	SMTPPort   int      `yaml:"smtp_port"`
-	From       string   `yaml:"from"`
-	Recipients []string `yaml:"recipients"`
-}
-
-// MonitorConfig controls polling behavior.
-type MonitorConfig struct {
-	Interval  string   `yaml:"interval"`  // e.g. "5m"
-	Paths     []string `yaml:"paths"`
-}
-
-// ParsedThresholds returns alert thresholds as time.Duration values.
-func (a *AlertsConfig) ParsedThresholds() ([]time.Duration, error) {
-	var durations []time.Duration
-	for _, t := range a.Thresholds {
-		d, err := time.ParseDuration(t)
-		if err != nil {
-			return nil, fmt.Errorf("invalid threshold %q: %w", t, err)
-		}
-		durations = append(durations, d)
-	}
-	return durations, nil
-}
-
-// Load reads and parses a YAML config file from the given path.
+// Load reads and validates a YAML config file at the given path.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("reading config file: %w", err)
+		return nil, fmt.Errorf("config: cannot read file %q: %w", path, err)
 	}
 
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parsing config file: %w", err)
+		return nil, fmt.Errorf("config: invalid YAML: %w", err)
 	}
 
-	if err := cfg.validate(); err != nil {
-		return nil, fmt.Errorf("invalid config: %w", err)
+	if cfg.VaultAddress == "" {
+		return nil, errors.New("config: vault_address is required")
+	}
+	if len(cfg.Paths) == 0 {
+		return nil, errors.New("config: at least one path is required")
+	}
+
+	warning := cfg.Thresholds.Warning
+	if warning == "" {
+		warning = "72h"
+	}
+	critical := cfg.Thresholds.Critical
+	if critical == "" {
+		critical = "24h"
+	}
+	interval := cfg.Interval
+	if interval == "" {
+		interval = "5m"
+	}
+
+	cfg.WarningThreshold, err = time.ParseDuration(warning)
+	if err != nil {
+		return nil, fmt.Errorf("config: invalid warning threshold %q: %w", warning, err)
+	}
+	cfg.CriticalThreshold, err = time.ParseDuration(critical)
+	if err != nil {
+		return nil, fmt.Errorf("config: invalid critical threshold %q: %w", critical, err)
+	}
+	cfg.PollInterval, err = time.ParseDuration(interval)
+	if err != nil {
+		return nil, fmt.Errorf("config: invalid interval %q: %w", interval, err)
 	}
 
 	return &cfg, nil
-}
-
-func (c *Config) validate() error {
-	if c.Vault.Address == "" {
-		return fmt.Errorf("vault.address is required")
-	}
-	if c.Vault.Token == "" && (c.Vault.RoleID == "" || c.Vault.SecretID == "") {
-		return fmt.Errorf("either vault.token or vault.role_id + vault.secret_id must be set")
-	}
-	if len(c.Monitor.Paths) == 0 {
-		return fmt.Errorf("monitor.paths must contain at least one path")
-	}
-	return nil
 }

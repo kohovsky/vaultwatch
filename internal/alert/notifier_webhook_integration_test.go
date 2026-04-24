@@ -18,7 +18,9 @@ func TestNotify_WebhookCalledOnWarning(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
-		json.NewDecoder(r.Body).Decode(&captured) //nolint:errcheck
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Errorf("failed to decode webhook payload: %v", err)
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()

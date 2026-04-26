@@ -9,72 +9,77 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config holds the full vaultwatch configuration.
+// Config holds all vaultwatch configuration.
 type Config struct {
-	VaultAddress string   `yaml:"vault_address"`
-	VaultToken   string   `yaml:"vault_token"`
-	Paths        []string `yaml:"paths"`
-	Interval     string   `yaml:"interval"`
-	Thresholds   struct {
-		Warning  string `yaml:"warning"`
-		Critical string `yaml:"critical"`
-	} `yaml:"thresholds"`
-	Alerts struct {
-		LogFile    string `yaml:"log_file"`
-		WebhookURL string `yaml:"webhook_url"`
-		SlackURL   string `yaml:"slack_url"`
-	} `yaml:"alerts"`
-
-	// Parsed durations — populated by Load.
-	WarningThreshold  time.Duration
-	CriticalThreshold time.Duration
-	PollInterval      time.Duration
+	VaultAddress string        `yaml:"vault_address"`
+	VaultToken   string        `yaml:"vault_token"`
+	Paths        []string      `yaml:"paths"`
+	Thresholds   []string      `yaml:"thresholds"`
+	Interval     string        `yaml:"interval"`
+	HistoryDir   string        `yaml:"history_dir"`
+	Alerts       AlertsConfig  `yaml:"alerts"`
+	Filter       FilterConfig  `yaml:"filter"`
 }
 
-// Load reads and validates a YAML config file at the given path.
+// FilterConfig mirrors monitor.FilterConfig for YAML unmarshalling.
+type FilterConfig struct {
+	IncludePrefixes []string `yaml:"include_prefixes"`
+	ExcludePrefixes []string `yaml:"exclude_prefixes"`
+}
+
+// AlertsConfig holds optional alert destinations.
+type AlertsConfig struct {
+	File    string `yaml:"file"`
+	Webhook string `yaml:"webhook"`
+	Slack   string `yaml:"slack"`
+	Email   *EmailConfig `yaml:"email"`
+}
+
+// EmailConfig holds SMTP settings.
+type EmailConfig struct {
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	From     string `yaml:"from"`
+	To       string `yaml:"to"`
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+}
+
+// Load reads and validates a YAML config file from path.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("config: cannot read file %q: %w", path, err)
+		return nil, fmt.Errorf("reading config: %w", err)
 	}
 
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("config: invalid YAML: %w", err)
+		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 
 	if cfg.VaultAddress == "" {
-		return nil, errors.New("config: vault_address is required")
+		return nil, errors.New("vault_address is required")
 	}
 	if len(cfg.Paths) == 0 {
-		return nil, errors.New("config: at least one path is required")
-	}
-
-	warning := cfg.Thresholds.Warning
-	if warning == "" {
-		warning = "72h"
-	}
-	critical := cfg.Thresholds.Critical
-	if critical == "" {
-		critical = "24h"
-	}
-	interval := cfg.Interval
-	if interval == "" {
-		interval = "5m"
-	}
-
-	cfg.WarningThreshold, err = time.ParseDuration(warning)
-	if err != nil {
-		return nil, fmt.Errorf("config: invalid warning threshold %q: %w", warning, err)
-	}
-	cfg.CriticalThreshold, err = time.ParseDuration(critical)
-	if err != nil {
-		return nil, fmt.Errorf("config: invalid critical threshold %q: %w", critical, err)
-	}
-	cfg.PollInterval, err = time.ParseDuration(interval)
-	if err != nil {
-		return nil, fmt.Errorf("config: invalid interval %q: %w", interval, err)
+		return nil, errors.New("at least one path is required")
 	}
 
 	return &cfg, nil
+}
+
+// ParsedThresholds converts threshold strings (e.g. "24h") to durations.
+func (c *Config) ParsedThresholds() ([]time.Duration, error) {
+	defaults := []time.Duration{72 * time.Hour, 24 * time.Hour}
+	if len(c.Thresholds) == 0 {
+		return defaults, nil
+	}
+	out := make([]time.Duration, 0, len(c.Thresholds))
+	for _, s := range c.Thresholds {
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return nil, fmt.Errorf("invalid threshold %q: %w", s, err)
+		}
+		out = append(out, d)
+	}
+	return out, nil
 }

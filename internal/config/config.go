@@ -83,3 +83,20 @@ func (c *Config) ParsedThresholds() ([]time.Duration, error) {
 	}
 	return out, nil
 }
+
+// ParsedInterval converts the Interval string to a time.Duration.
+// If Interval is empty, it returns a default of 5 minutes.
+func (c *Config) ParsedInterval() (time.Duration, error) {
+	const defaultInterval = 5 * time.Minute
+	if c.Interval == "" {
+		return defaultInterval, nil
+	}
+	d, err := time.ParseDuration(c.Interval)
+	if err != nil {
+		return 0, fmt.Errorf("invalid interval %q: %w", c.Interval, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("interval must be positive, got %q", c.Interval)
+	}
+	return d, nil
+}

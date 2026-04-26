@@ -5,72 +5,78 @@ import (
 	"log"
 	"time"
 
-	"github.com/yourusername/vaultwatch/internal/alert"
-	"github.com/yourusername/vaultwatch/internal/vault"
+	"github.com/czeslavo/vaultwatch/internal/alert"
+	"github.com/czeslavo/vaultwatch/internal/config"
+	"github.com/czeslavo/vaultwatch/internal/vault"
 )
 
-// SchedulerConfig holds configuration for the polling scheduler.
-type SchedulerConfig struct {
-	Interval   time.Duration
-	Paths      []string
-	Thresholds []time.Duration
-	HistoryDir string
-}
-
-// Scheduler periodically polls Vault secrets and dispatches alerts.
+// Scheduler periodically polls Vault secrets and triggers alerts.
 type Scheduler struct {
-	cfg      SchedulerConfig
-	client   *vault.Client
-	notifier *alert.Notifier
-	history  *History
+	cfg    *config.Config
+	client *vault.Client
+	hist   *History
+	dedup  *DedupWindow
 }
 
-// NewScheduler creates a new Scheduler.
-func NewScheduler(cfg SchedulerConfig, client *vault.Client, notifier *alert.Notifier) (*Scheduler, error) {
-	h, err := NewHistory(cfg.HistoryDir)
+// NewScheduler constructs a Scheduler. Returns an error if the history
+// directory cannot be initialised.
+func NewScheduler(cfg *config.Config, client *vault.Client) (*Scheduler, error) {
+	hist, err := NewHistory(cfg.HistoryDir)
 	if err != nil {
 		return nil, err
 	}
+	cooldown, _ := time.ParseDuration(cfg.DedupCooldown)
 	return &Scheduler{
-		cfg:      cfg,
-		client:   client,
-		notifier: notifier,
-		history:  h,
+		cfg:   cfg,
+		client: client,
+		hist:  hist,
+		dedup: NewDedupWindow(cooldown),
 	}, nil
 }
 
-// Run starts the scheduler loop, blocking until ctx is cancelled.
-func (s *Scheduler) Run(ctx context.Context) {
-	ticker := time.NewTicker(s.cfg.Interval)
+// Run starts the polling loop and blocks until ctx is cancelled.
+func (s *Scheduler) Run(ctx context.Context, notifier *alert.Notifier) {
+	interval := ParseInterval(s.cfg.Interval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	log.Printf("[scheduler] starting poll loop every %s", s.cfg.Interval)
-	s.poll(ctx)
+	log.Printf("[scheduler] starting — interval=%s", interval)
+	s.poll(notifier)
 
 	for {
 		select {
 		case <-ticker.C:
-			s.poll(ctx)
+			s.poll(notifier)
 		case <-ctx.Done():
-			log.Println("[scheduler] context cancelled, stopping")
+			log.Println("[scheduler] stopping")
 			return
 		}
 	}
 }
 
-func (s *Scheduler) poll(ctx context.Context) {
-	statuses := CheckAll(ctx, s.client, s.cfg.Paths, s.cfg.Thresholds)
+func (s *Scheduler) poll(notifier *alert.Notifier) {
+	infos, err := s.client.GetSecretsInfo(s.cfg.Paths)
+	if err != nil {
+		log.Printf("[scheduler] vault error: %v", err)
+		return
+	}
+
+	filtered := Filter(infos, s.cfg.FilterRules)
+	statuses := CheckAll(filtered, s.cfg.ParsedThresholds())
+
 	for _, st := range statuses {
-		if s.history.HasChanged(st.Path, st.Status) {
-			if err := s.notifier.Notify(st); err != nil {
+		key := DedupKey(st.Path, string(st.Status))
+		if s.hist.HasChanged(st.Path, string(st.Status)) || !s.dedup.IsDuplicate(key) {
+			if err := notifier.Notify(st); err != nil {
 				log.Printf("[scheduler] notify error for %s: %v", st.Path, err)
 			}
-			s.history.Record(st.Path, st.Status)
+			s.hist.Record(st.Path, string(st.Status))
 		}
 	}
-	if err := s.history.Save(); err != nil {
-		log.Printf("[scheduler] failed to save history: %v", err)
+
+	s.dedup.Evict()
+
+	if err := s.hist.Save(); err != nil {
+		log.Printf("[scheduler] history save error: %v", err)
 	}
-	summary := Summarize(statuses)
-	log.Printf("[scheduler] poll complete: %s", FormatSummary(summary))
 }

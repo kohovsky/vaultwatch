@@ -67,6 +67,14 @@ func (h *History) Record(path, status string, expiresAt time.Time) {
 	}
 }
 
+// Get returns the last recorded StatusRecord for the given path, and whether it exists.
+func (h *History) Get(path string) (StatusRecord, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	record, ok := h.records[path]
+	return record, ok
+}
+
 // Save persists the current history to disk (no-op if filePath is empty).
 func (h *History) Save() error {
 	if h.filePath == "" {
